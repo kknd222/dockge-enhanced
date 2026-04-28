@@ -143,6 +143,29 @@ export class TerminalSocketHandler extends AgentSocketHandler {
             }
         });
 
+        agentSocket.on("cancelTerminal", async (terminalName : unknown, callback) => {
+            try {
+                checkLogin(socket);
+
+                if (typeof(terminalName) !== "string") {
+                    throw new ValidationError("Terminal name must be a string.");
+                }
+
+                const closed = Terminal.closeTerminal(terminalName);
+
+                if (!closed) {
+                    throw new ValidationError("Terminal not found.");
+                }
+
+                callbackResult({
+                    ok: true,
+                    msg: "Cancellation requested",
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
+
         // Leave Combined Terminal
         agentSocket.on("leaveCombinedTerminal", async (stackName : unknown, callback) => {
             try {

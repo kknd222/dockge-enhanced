@@ -20,3 +20,9 @@ services:
     environment:
       # Tell Dockge where is your stacks directory
       - DOCKGE_STACKS_DIR=/opt/stacks
+      # Optional: enable enhanced pull mode with native docker image storage
+      # - DOCKGE_ENHANCED_PULL_ENABLED=true
+      # - DOCKGE_ENHANCED_PULL_CONCURRENCY=3
+      # - DOCKGE_ENHANCED_PULL_RETRIES=2
+      # - DOCKGE_ENHANCED_PULL_MIRRORS=docker.m.daocloud.io,dockerproxy.cn
+      # - DOCKGE_ENHANCED_PULL_MIRROR_MAP={"ghcr.io":["ghcr.nju.edu.cn"]}

@@ -4,6 +4,7 @@ import { log } from "./log";
 import yaml from "yaml";
 import { DockgeSocket, fileExists, ValidationError } from "./util-server";
 import path from "path";
+import dotenv from "dotenv";
 import {
     acceptedComposeFileNames,
     COMBINED_TERMINAL_COLS,
@@ -16,9 +17,11 @@ import {
     RUNNING, TERMINAL_ROWS,
     UNKNOWN
 } from "../common/util-common";
+import { envsubstYAML } from "../common/util-common";
 import { InteractiveTerminal, Terminal } from "./terminal";
 import childProcessAsync from "promisify-child-process";
 import { Settings } from "./settings";
+import { getEnhancedPullConfig } from "./enhanced-pull-config";
 
 export class Stack {
 
@@ -206,6 +209,7 @@ export class Stack {
 
     async deploy(socket : DockgeSocket) : Promise<number> {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
+        await this.pullImages(socket, terminalName);
         let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
         if (exitCode !== 0) {
             throw new Error("Failed to deploy, please check the terminal output for more information.");
@@ -456,10 +460,7 @@ export class Stack {
 
     async update(socket: DockgeSocket) {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("pull"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to pull, please check the terminal output for more information.");
-        }
+        let exitCode = await this.pullImages(socket, terminalName);
 
         // If the stack is not running, we don't need to restart it
         await this.updateStatus();
@@ -579,5 +580,82 @@ export class Stack {
         }
 
         return exitCode;
+    }
+
+    async pullImages(socket : DockgeSocket, terminalName : string) : Promise<number> {
+        const enhancedPullConfig = await getEnhancedPullConfig();
+
+        if (!enhancedPullConfig.enabled) {
+            const exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("pull"), this.path);
+            if (exitCode !== 0) {
+                throw new Error("Failed to pull, please check the terminal output for more information.");
+            }
+            return exitCode;
+        }
+
+        const imageList = this.getImageList();
+
+        if (imageList.length === 0) {
+            log.debug("pullImages", `No explicit images found in stack ${this.name}, skipping enhanced pull.`);
+            return 0;
+        }
+
+        const args = [
+            path.resolve("extra/enhanced-pull.ts"),
+            "--concurrency", enhancedPullConfig.concurrency.toString(),
+            "--retries", enhancedPullConfig.retries.toString(),
+            "--mirror-map-json", JSON.stringify(enhancedPullConfig.mirrorMap),
+        ];
+
+        if (enhancedPullConfig.keepMirrorTags) {
+            args.push("--keep-mirror-tags");
+        }
+
+        for (const image of imageList) {
+            args.push("--image", image);
+        }
+
+        const exitCode = await Terminal.exec(this.server, socket, terminalName, "tsx", args, process.cwd());
+        if (exitCode !== 0) {
+            throw new Error("Failed to pull in enhanced mode, please check the terminal output for more information.");
+        }
+        return exitCode;
+    }
+
+    getImageList() : string[] {
+        const env = this.getComposeEnvironmentVariables();
+        const composeYAML = envsubstYAML(this.composeYAML, env);
+        const composeConfig = yaml.parse(composeYAML) as {
+            services?: Record<string, { image?: string }>
+        } | null;
+
+        if (!composeConfig?.services || typeof composeConfig.services !== "object") {
+            return [];
+        }
+
+        const imageSet = new Set<string>();
+
+        for (const service of Object.values(composeConfig.services)) {
+            if (service && typeof(service.image) === "string" && service.image.trim() !== "") {
+                imageSet.add(service.image.trim());
+            }
+        }
+
+        return Array.from(imageSet);
+    }
+
+    getComposeEnvironmentVariables() : dotenv.DotenvParseOutput {
+        const env : dotenv.DotenvParseOutput = {};
+        const globalEnvPath = path.join(this.server.stacksDir, "global.env");
+
+        if (fs.existsSync(globalEnvPath)) {
+            Object.assign(env, dotenv.parse(fs.readFileSync(globalEnvPath, "utf-8")));
+        }
+
+        if (this.composeENV.trim() !== "") {
+            Object.assign(env, dotenv.parse(this.composeENV));
+        }
+
+        return env;
     }
 }

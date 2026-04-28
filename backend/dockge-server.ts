@@ -37,6 +37,7 @@ import { AgentSocketHandler } from "./agent-socket-handler";
 import { AgentSocket } from "../common/agent-socket";
 import { ManageAgentSocketHandler } from "./socket-handlers/manage-agent-socket-handler";
 import { Terminal } from "./terminal";
+import { getEnhancedPullConfig } from "./enhanced-pull-config";
 
 export class DockgeServer {
     app : Express;
@@ -427,6 +428,7 @@ export class DockgeServer {
         let versionProperty;
         let latestVersionProperty;
         let isContainer;
+        const enhancedPullConfig = await getEnhancedPullConfig();
 
         if (!hideVersion) {
             versionProperty = packageJSON.version;
@@ -439,6 +441,14 @@ export class DockgeServer {
             latestVersion: latestVersionProperty,
             isContainer,
             primaryHostname: await Settings.get("primaryHostname"),
+            enhancedPull: {
+                enabled: enhancedPullConfig.enabled,
+                concurrency: enhancedPullConfig.concurrency,
+                retries: enhancedPullConfig.retries,
+                keepMirrorTags: enhancedPullConfig.keepMirrorTags,
+                mirrorMap: enhancedPullConfig.mirrorMap,
+                mirrorSources: enhancedPullConfig.mirrorSources,
+            },
             //serverTimezone: await this.getTimezone(),
             //serverTimezoneOffset: this.getTimezoneOffset(),
         });

@@ -80,6 +80,9 @@ export default {
                 appearance: {
                     title: this.$t("Appearance"),
                 },
+                imagePull: {
+                    title: this.$t("imagePull"),
+                },
                 security: {
                     title: this.$t("Security"),
                 },
@@ -123,6 +126,31 @@ export default {
                 if (this.settings.checkUpdate === undefined) {
                     this.settings.checkUpdate = true;
                 }
+                if (this.settings.enhancedPullEnabled === undefined) {
+                    this.settings.enhancedPullEnabled = false;
+                }
+                if (this.settings.enhancedPullConcurrency === undefined) {
+                    this.settings.enhancedPullConcurrency = 2;
+                }
+                if (this.settings.enhancedPullRetries === undefined) {
+                    this.settings.enhancedPullRetries = 1;
+                }
+                if (this.settings.enhancedPullKeepMirrorTags === undefined) {
+                    this.settings.enhancedPullKeepMirrorTags = false;
+                }
+                if (this.settings.enhancedPullMirrors === undefined) {
+                    this.settings.enhancedPullMirrors = "";
+                }
+                if (!Array.isArray(this.settings.enhancedPullMirrorSources)) {
+                    this.settings.enhancedPullMirrorSources = [];
+                }
+                if (this.settings.enhancedPullMirrorMapText === undefined) {
+                    if (this.settings.enhancedPullMirrorMap && typeof this.settings.enhancedPullMirrorMap === "object") {
+                        this.settings.enhancedPullMirrorMapText = JSON.stringify(this.settings.enhancedPullMirrorMap, null, 2);
+                    } else {
+                        this.settings.enhancedPullMirrorMapText = "";
+                    }
+                }
                 this.settingsLoaded = true;
             });
         },
@@ -165,6 +193,47 @@ export default {
                     msg: this.$t("dataRetentionTimeError"),
                 };
             }
+
+            if (!Number.isInteger(this.settings.enhancedPullConcurrency) || this.settings.enhancedPullConcurrency < 1) {
+                return {
+                    success: false,
+                    msg: this.$t("enhancedPullConcurrencyError"),
+                };
+            }
+
+            if (!Number.isInteger(this.settings.enhancedPullRetries) || this.settings.enhancedPullRetries < 0) {
+                return {
+                    success: false,
+                    msg: this.$t("enhancedPullRetriesError"),
+                };
+            }
+
+            if (Array.isArray(this.settings.enhancedPullMirrorSources)) {
+                for (const source of this.settings.enhancedPullMirrorSources) {
+                    if (!source.mirror || !source.registry) {
+                        return {
+                            success: false,
+                            msg: this.$t("enhancedPullSourceValidationError"),
+                        };
+                    }
+                }
+            }
+
+            if (this.settings.enhancedPullMirrorMapText && this.settings.enhancedPullMirrorMapText.trim() !== "") {
+                try {
+                    const parsedValue = JSON.parse(this.settings.enhancedPullMirrorMapText);
+
+                    if (typeof(parsedValue) !== "object" || parsedValue === null || Array.isArray(parsedValue)) {
+                        throw new Error("Invalid mirror map");
+                    }
+                } catch (error) {
+                    return {
+                        success: false,
+                        msg: this.$t("enhancedPullMirrorMapError"),
+                    };
+                }
+            }
+
             return {
                 success: true,
                 msg: "",

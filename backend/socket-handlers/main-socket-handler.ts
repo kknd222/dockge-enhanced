@@ -20,6 +20,11 @@ import jwt from "jsonwebtoken";
 import { Settings } from "../settings";
 import fs, { promises as fsAsync } from "fs";
 import path from "path";
+import {
+    normalizeMirrorSourceList,
+    parseMirrorMap,
+    testMirrorSource
+} from "../enhanced-pull-config";
 
 export class MainSocketHandler extends SocketHandler {
     create(socket : DockgeSocket, server : DockgeServer) {
@@ -250,6 +255,11 @@ export class MainSocketHandler extends SocketHandler {
                     data.globalENV = "# VARIABLE=value #comment";
                 }
 
+                data.enhancedPullMirrors = data.enhancedPullMirrors || "";
+                data.enhancedPullMirrorSources = normalizeMirrorSourceList(data.enhancedPullMirrorSources, data.enhancedPullMirrors);
+                data.enhancedPullMirrorMap = parseMirrorMap(data.enhancedPullMirrorMap, data.enhancedPullMirrorSources);
+                data.enhancedPullMirrorMapText = JSON.stringify(data.enhancedPullMirrorMap, null, 2);
+
                 callback({
                     ok: true,
                     data: data,
@@ -289,6 +299,16 @@ export class MainSocketHandler extends SocketHandler {
                 }
                 delete data.globalENV;
 
+                if (typeof(data.enhancedPullMirrorMapText) === "string") {
+                    if (data.enhancedPullMirrorMapText.trim() === "") {
+                        data.enhancedPullMirrorMap = {};
+                    } else {
+                        data.enhancedPullMirrorMap = JSON.parse(data.enhancedPullMirrorMapText);
+                    }
+                }
+                data.enhancedPullMirrorSources = normalizeMirrorSourceList(data.enhancedPullMirrorSources, data.enhancedPullMirrors);
+                delete data.enhancedPullMirrorMapText;
+
                 await Settings.setSettings("general", data);
 
                 callback({
@@ -305,6 +325,45 @@ export class MainSocketHandler extends SocketHandler {
                         msg: e.message,
                     });
                 }
+            }
+        });
+
+        socket.on("testImagePullSources", async (sourceList, sortFastest, callback) => {
+            try {
+                checkLogin(socket);
+
+                const normalizedSourceList = normalizeMirrorSourceList(sourceList);
+                const testedSourceList = await Promise.all(normalizedSourceList.map(async (source) => {
+                    return testMirrorSource(source);
+                }));
+
+                let resultSourceList = testedSourceList;
+
+                if (sortFastest) {
+                    resultSourceList = [ ...testedSourceList ].sort((a, b) => {
+                        if (a.lastStatus === "success" && b.lastStatus !== "success") {
+                            return -1;
+                        }
+
+                        if (b.lastStatus === "success" && a.lastStatus !== "success") {
+                            return 1;
+                        }
+
+                        if (a.lastStatus === "success" && b.lastStatus === "success") {
+                            return (a.lastTestMs || Number.MAX_SAFE_INTEGER) - (b.lastTestMs || Number.MAX_SAFE_INTEGER);
+                        }
+
+                        return a.name.localeCompare(b.name);
+                    });
+                }
+
+                callback({
+                    ok: true,
+                    sourceList: resultSourceList,
+                    fastestSource: resultSourceList.find((source) => source.lastStatus === "success") || null,
+                });
+            } catch (e) {
+                callbackError(e, callback);
             }
         });
 

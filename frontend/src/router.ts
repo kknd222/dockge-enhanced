@@ -13,6 +13,7 @@ const Settings = () => import("./pages/Settings.vue");
 // Settings - Sub Pages
 import Appearance from "./components/settings/Appearance.vue";
 import General from "./components/settings/General.vue";
+import ImagePull from "./components/settings/ImagePull.vue";
 const Security = () => import("./components/settings/Security.vue");
 const GlobalEnv = () => import("./components/settings/GlobalEnv.vue");
 import About from "./components/settings/About.vue";
@@ -74,6 +75,10 @@ const routes = [
                             {
                                 path: "appearance",
                                 component: Appearance,
+                            },
+                            {
+                                path: "imagePull",
+                                component: ImagePull,
                             },
                             {
                                 path: "security",

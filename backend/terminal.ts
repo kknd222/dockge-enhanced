@@ -212,6 +212,17 @@ export class Terminal {
         return Terminal.terminalMap.get(name);
     }
 
+    public static closeTerminal(name : string) : boolean {
+        const terminal = Terminal.getTerminal(name);
+
+        if (!terminal) {
+            return false;
+        }
+
+        terminal.close();
+        return true;
+    }
+
     public static getOrCreateTerminal(server : DockgeServer, name : string, file : string, args : string | string[], cwd : string) : Terminal {
         // Since exited terminal will be removed from the map, it is safe to get the terminal from the map
         let terminal = Terminal.getTerminal(name);
