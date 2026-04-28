@@ -424,6 +424,7 @@ export class Stack {
 
     async start(socket: DockgeSocket) {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
+        await this.pullImages(socket, terminalName);
         let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
         if (exitCode !== 0) {
             throw new Error("Failed to start, please check the terminal output for more information.");
