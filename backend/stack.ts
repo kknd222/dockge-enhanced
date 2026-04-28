@@ -721,6 +721,9 @@ export class Stack {
             const res = await childProcessAsync.spawn("docker", [ "image", "inspect", image, "--format", "{{json .RepoDigests}}" ], {
                 encoding: "utf-8",
             });
+            if (!res.stdout) {
+                return [];
+            }
             return JSON.parse(res.stdout.toString()) as string[];
         } catch (error) {
             return [];
