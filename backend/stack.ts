@@ -602,6 +602,7 @@ export class Stack {
         }
 
         const args = [
+            path.resolve("node_modules/tsx/dist/cli.mjs"),
             path.resolve("extra/enhanced-pull.ts"),
             "--concurrency", enhancedPullConfig.concurrency.toString(),
             "--retries", enhancedPullConfig.retries.toString(),
@@ -616,7 +617,7 @@ export class Stack {
             args.push("--image", image);
         }
 
-        const exitCode = await Terminal.exec(this.server, socket, terminalName, "tsx", args, process.cwd());
+        const exitCode = await Terminal.exec(this.server, socket, terminalName, "node", args, process.cwd());
         if (exitCode !== 0) {
             throw new Error("Failed to pull in enhanced mode, please check the terminal output for more information.");
         }
