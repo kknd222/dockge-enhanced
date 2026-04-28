@@ -1,5 +1,9 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
+const MIRROR_PROBE_TIMEOUT_MS = 3000;
+const PULL_TIMEOUT_MS = 90000;
+const MAX_MIRROR_ATTEMPTS = 2;
+
 interface PullConfig {
     concurrency: number;
     retries: number;
@@ -72,46 +76,63 @@ async function main() {
 
 async function pullImage(image : string, config : PullConfig) {
     const imageReference = parseImageReference(image);
-    const candidateImages = buildCandidateImages(imageReference, config.mirrorMap);
+    const candidateImages = await buildCandidateImages(imageReference, config.mirrorMap);
     const maxAttempts = Math.max(config.retries + 1, 1);
+    const mirrorCandidates = candidateImages.filter((candidateImage) => candidateImage !== image);
+    const directCandidates = candidateImages.filter((candidateImage) => candidateImage === image);
+    const mirrorAttempts = Math.min(maxAttempts, MAX_MIRROR_ATTEMPTS);
+    const directAttempts = Math.max(1, maxAttempts - mirrorAttempts);
 
     console.log(`[enhanced-pull] Candidates for ${image}: ${candidateImages.join(" -> ")}`);
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        for (const candidateImage of candidateImages) {
+    for (const candidateImage of mirrorCandidates) {
+        await tryPullCandidate(image, candidateImage, mirrorAttempts);
+    }
+
+    for (const candidateImage of directCandidates) {
+        await tryPullCandidate(image, candidateImage, directAttempts);
+    }
+
+    throw new Error(`All pull attempts failed for ${image}`);
+
+    async function tryPullCandidate(originalImage : string, candidateImage : string, allowedAttempts : number) {
+        if (allowedAttempts <= 0) {
+            return;
+        }
+
+        for (let attempt = 1; attempt <= allowedAttempts; attempt++) {
             if (isStopping) {
                 throw new Error("Pull cancelled");
             }
 
-            console.log(`[enhanced-pull] Pulling ${image} via ${candidateImage} (attempt ${attempt}/${maxAttempts})`);
-            const pullExitCode = await runDockerCommand([ "pull", candidateImage ], image);
+            console.log(`[enhanced-pull] Pulling ${originalImage} via ${candidateImage} (attempt ${attempt}/${allowedAttempts})`);
+            const pullExitCode = await runDockerCommand([ "pull", candidateImage ], originalImage, false, PULL_TIMEOUT_MS);
 
             if (pullExitCode !== 0) {
                 console.log(`[enhanced-pull] Pull failed for ${candidateImage}`);
                 continue;
             }
 
-            if (candidateImage !== image) {
-                console.log(`[enhanced-pull] Retagging ${candidateImage} back to ${image}`);
-                const tagExitCode = await runDockerCommand([ "image", "tag", candidateImage, image ], image);
+            if (candidateImage !== originalImage) {
+                console.log(`[enhanced-pull] Retagging ${candidateImage} back to ${originalImage}`);
+                const tagExitCode = await runDockerCommand([ "image", "tag", candidateImage, originalImage ], originalImage);
 
                 if (tagExitCode !== 0) {
-                    console.log(`[enhanced-pull] Tagging ${candidateImage} back to ${image} failed.`);
+                    console.log(`[enhanced-pull] Tagging ${candidateImage} back to ${originalImage} failed.`);
                     continue;
                 }
 
                 if (!config.keepMirrorTags) {
                     console.log(`[enhanced-pull] Removing temporary mirror tag ${candidateImage}`);
-                    await runDockerCommand([ "image", "rm", candidateImage ], image, true);
+                    await runDockerCommand([ "image", "rm", candidateImage ], originalImage, true);
                 }
             }
 
-            console.log(`[enhanced-pull] Pull completed for ${image}`);
-            return;
+            console.log(`[enhanced-pull] Pull completed for ${originalImage}`);
+            process.exitCode = 0;
+            throw new SuccessSignal();
         }
     }
-
-    throw new Error(`All pull attempts failed for ${image}`);
 }
 
 function parseArgs(args : string[]) : PullConfig {
@@ -186,34 +207,63 @@ function parseImageReference(image : string) : ImageReference {
     };
 }
 
-function buildCandidateImages(imageReference : ImageReference, mirrorMap : Record<string, string[]>) : string[] {
+async function buildCandidateImages(imageReference : ImageReference, mirrorMap : Record<string, string[]>) : Promise<string[]> {
     const candidates = new Set<string>();
     const mirrors = mirrorMap[imageReference.registry] || [];
+    const availableMirrors : string[] = [];
 
     for (const mirror of mirrors) {
         const normalizedMirror = mirror.trim().replace(/\/+$/, "");
 
         if (normalizedMirror !== "") {
-            candidates.add(`${normalizedMirror}/${imageReference.repository}${imageReference.suffix}`);
+            const probeResult = await probeMirror(normalizedMirror);
+
+            if (probeResult.ok) {
+                console.log(`[enhanced-pull] Mirror probe OK for ${normalizedMirror} (${probeResult.elapsedMs} ms)`);
+                availableMirrors.push(normalizedMirror);
+            } else {
+                console.log(`[enhanced-pull] Mirror probe failed for ${normalizedMirror}: ${probeResult.error}`);
+            }
         }
+    }
+
+    for (const mirror of availableMirrors) {
+        candidates.add(`${mirror}/${imageReference.repository}${imageReference.suffix}`);
     }
 
     candidates.add(imageReference.original);
     return Array.from(candidates);
 }
 
-async function runDockerCommand(args : string[], image : string, allowFailure = false) : Promise<number> {
+async function runDockerCommand(args : string[], image : string, allowFailure = false, timeoutMs = 0) : Promise<number> {
     return new Promise((resolve, reject) => {
         const child = spawn("docker", args, {
             stdio: [ "ignore", "pipe", "pipe" ],
         });
+        let timedOut = false;
+        let timeout : NodeJS.Timeout | undefined;
 
         activeChildren.add(child);
         pipeOutput(child.stdout, image);
         pipeOutput(child.stderr, image);
 
+        if (timeoutMs > 0) {
+            timeout = setTimeout(() => {
+                timedOut = true;
+                console.log(`[${image}] Command timed out after ${timeoutMs} ms: docker ${args.join(" ")}`);
+                child.kill("SIGINT");
+
+                setTimeout(() => {
+                    if (!child.killed) {
+                        child.kill("SIGTERM");
+                    }
+                }, 5000).unref();
+            }, timeoutMs);
+        }
+
         child.on("error", (error) => {
             activeChildren.delete(child);
+            clearTimeout(timeout);
 
             if (allowFailure) {
                 console.log(`[${image}] ${error.message}`);
@@ -226,6 +276,12 @@ async function runDockerCommand(args : string[], image : string, allowFailure = 
 
         child.on("close", (code) => {
             activeChildren.delete(child);
+            clearTimeout(timeout);
+
+            if (timedOut) {
+                resolve(124);
+                return;
+            }
 
             if (code === 0 || allowFailure) {
                 resolve(code ?? 0);
@@ -236,6 +292,58 @@ async function runDockerCommand(args : string[], image : string, allowFailure = 
         });
     });
 }
+
+async function probeMirror(mirror : string) : Promise<{ ok: boolean, elapsedMs: number, error: string }> {
+    const controller = new AbortController();
+    const startTime = Date.now();
+    const timeout = setTimeout(() => {
+        controller.abort();
+    }, MIRROR_PROBE_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(buildMirrorTestURL(mirror), {
+            method: "GET",
+            redirect: "manual",
+            signal: controller.signal,
+            headers: {
+                Accept: "application/json",
+            },
+        });
+        const elapsedMs = Date.now() - startTime;
+
+        if ([ 200, 401 ].includes(response.status)) {
+            return {
+                ok: true,
+                elapsedMs,
+                error: "",
+            };
+        }
+
+        return {
+            ok: false,
+            elapsedMs,
+            error: `HTTP ${response.status}`,
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            elapsedMs: Date.now() - startTime,
+            error: error instanceof Error ? error.message : "Unknown error",
+        };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function buildMirrorTestURL(mirror : string) : string {
+    if (mirror.startsWith("http://") || mirror.startsWith("https://")) {
+        return mirror.replace(/\/+$/, "") + "/v2/";
+    }
+
+    return `https://${mirror.replace(/\/+$/, "")}/v2/`;
+}
+
+class SuccessSignal extends Error {}
 
 function pipeOutput(stream : NodeJS.ReadableStream, image : string) {
     let buffer = "";
@@ -259,6 +367,10 @@ function pipeOutput(stream : NodeJS.ReadableStream, image : string) {
 }
 
 main().catch((error) => {
+    if (error instanceof SuccessSignal) {
+        process.exit(0);
+    }
+
     if (error instanceof Error) {
         console.error(`[enhanced-pull] ${error.message}`);
     } else {
