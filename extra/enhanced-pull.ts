@@ -4,6 +4,7 @@ const MIRROR_PROBE_TIMEOUT_MS = 3000;
 const PULL_TIMEOUT_MS = 90000;
 const MAX_MIRROR_ATTEMPTS = 2;
 const MIRROR_PROGRESS_TIMEOUT_MS = 15000;
+const DIRECT_PULL_TIMEOUT_MS = 0;
 
 interface PullConfig {
     concurrency: number;
@@ -78,11 +79,10 @@ async function main() {
 async function pullImage(image : string, config : PullConfig) {
     const imageReference = parseImageReference(image);
     const candidateImages = await buildCandidateImages(imageReference, config.mirrorMap);
-    const maxAttempts = Math.max(config.retries + 1, 1);
     const mirrorCandidates = candidateImages.filter((candidateImage) => candidateImage !== image);
     const directCandidates = candidateImages.filter((candidateImage) => candidateImage === image);
-    const mirrorAttempts = Math.min(maxAttempts, MAX_MIRROR_ATTEMPTS);
-    const directAttempts = Math.max(1, maxAttempts - mirrorAttempts);
+    const mirrorAttempts = MAX_MIRROR_ATTEMPTS;
+    const directAttempts = 1;
 
     console.log(`[enhanced-pull] Candidates for ${image}: ${candidateImages.join(" -> ")}`);
 
@@ -109,7 +109,7 @@ async function pullImage(image : string, config : PullConfig) {
             console.log(`[enhanced-pull] Pulling ${originalImage} via ${candidateImage} (attempt ${attempt}/${allowedAttempts})`);
             const pullExitCode = await runDockerCommand([ "pull", candidateImage ], originalImage, {
                 allowFailure: false,
-                timeoutMs: PULL_TIMEOUT_MS,
+                timeoutMs: candidateImage !== originalImage ? PULL_TIMEOUT_MS : DIRECT_PULL_TIMEOUT_MS,
                 requireProgressWithinMs: candidateImage !== originalImage ? MIRROR_PROGRESS_TIMEOUT_MS : 0,
             });
 
