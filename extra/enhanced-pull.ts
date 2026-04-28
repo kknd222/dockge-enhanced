@@ -1,9 +1,9 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
 const MIRROR_PROBE_TIMEOUT_MS = 3000;
-const PULL_TIMEOUT_MS = 90000;
 const MAX_MIRROR_ATTEMPTS = 2;
-const MIRROR_PROGRESS_TIMEOUT_MS = 15000;
+const MIRROR_WARMUP_PROGRESS_TIMEOUT_MS = 15000;
+const MIRROR_PULL_TIMEOUT_MS = 300000;
 const DIRECT_PULL_TIMEOUT_MS = 0;
 
 interface PullConfig {
@@ -109,8 +109,8 @@ async function pullImage(image : string, config : PullConfig) {
             console.log(`[enhanced-pull] Pulling ${originalImage} via ${candidateImage} (attempt ${attempt}/${allowedAttempts})`);
             const pullExitCode = await runDockerCommand([ "pull", candidateImage ], originalImage, {
                 allowFailure: false,
-                timeoutMs: candidateImage !== originalImage ? PULL_TIMEOUT_MS : DIRECT_PULL_TIMEOUT_MS,
-                requireProgressWithinMs: candidateImage !== originalImage ? MIRROR_PROGRESS_TIMEOUT_MS : 0,
+                activeTimeoutMs: candidateImage !== originalImage ? MIRROR_PULL_TIMEOUT_MS : DIRECT_PULL_TIMEOUT_MS,
+                progressProbeTimeoutMs: candidateImage !== originalImage ? MIRROR_WARMUP_PROGRESS_TIMEOUT_MS : 0,
             });
 
             if (pullExitCode !== 0) {
@@ -244,58 +244,51 @@ async function buildCandidateImages(imageReference : ImageReference, mirrorMap :
 
 async function runDockerCommand(args : string[], image : string, options : {
     allowFailure?: boolean,
-    timeoutMs?: number,
-    requireProgressWithinMs?: number,
+    activeTimeoutMs?: number,
+    progressProbeTimeoutMs?: number,
 } = {}) : Promise<number> {
     return new Promise((resolve, reject) => {
         const allowFailure = options.allowFailure === true;
-        const timeoutMs = options.timeoutMs || 0;
-        const requireProgressWithinMs = options.requireProgressWithinMs || 0;
+        const activeTimeoutMs = options.activeTimeoutMs || 0;
+        const progressProbeTimeoutMs = options.progressProbeTimeoutMs || 0;
         const child = spawn("docker", args, {
             stdio: [ "ignore", "pipe", "pipe" ],
         });
-        let timedOut = false;
-        let timeout : NodeJS.Timeout | undefined;
+        let activeTimedOut = false;
+        let activeTimeout : NodeJS.Timeout | undefined;
         let progressTimedOut = false;
         let progressTimeout : NodeJS.Timeout | undefined;
         let hasMeaningfulProgress = false;
+        let activeTimeoutStarted = false;
 
         activeChildren.add(child);
         pipeOutput(child.stdout, image, (line) => {
             if (isMeaningfulPullProgress(line)) {
                 hasMeaningfulProgress = true;
                 clearTimeout(progressTimeout);
+                startActiveTimeout();
             }
         });
         pipeOutput(child.stderr, image, (line) => {
             if (isMeaningfulPullProgress(line)) {
                 hasMeaningfulProgress = true;
                 clearTimeout(progressTimeout);
+                startActiveTimeout();
             }
         });
 
-        if (timeoutMs > 0) {
-            timeout = setTimeout(() => {
-                timedOut = true;
-                console.log(`[${image}] Command timed out after ${timeoutMs} ms: docker ${args.join(" ")}`);
-                child.kill("SIGINT");
-
-                setTimeout(() => {
-                    if (!child.killed) {
-                        child.kill("SIGTERM");
-                    }
-                }, 5000).unref();
-            }, timeoutMs);
+        if (progressProbeTimeoutMs === 0) {
+            startActiveTimeout();
         }
 
-        if (requireProgressWithinMs > 0) {
+        if (progressProbeTimeoutMs > 0) {
             progressTimeout = setTimeout(() => {
                 if (hasMeaningfulProgress) {
                     return;
                 }
 
                 progressTimedOut = true;
-                console.log(`[${image}] No download progress within ${requireProgressWithinMs} ms: docker ${args.join(" ")}`);
+                console.log(`[${image}] No download progress within ${progressProbeTimeoutMs} ms: docker ${args.join(" ")}`);
                 child.kill("SIGINT");
 
                 setTimeout(() => {
@@ -303,12 +296,12 @@ async function runDockerCommand(args : string[], image : string, options : {
                         child.kill("SIGTERM");
                     }
                 }, 5000).unref();
-            }, requireProgressWithinMs);
+            }, progressProbeTimeoutMs);
         }
 
         child.on("error", (error) => {
             activeChildren.delete(child);
-            clearTimeout(timeout);
+            clearTimeout(activeTimeout);
             clearTimeout(progressTimeout);
 
             if (allowFailure) {
@@ -322,10 +315,10 @@ async function runDockerCommand(args : string[], image : string, options : {
 
         child.on("close", (code) => {
             activeChildren.delete(child);
-            clearTimeout(timeout);
+            clearTimeout(activeTimeout);
             clearTimeout(progressTimeout);
 
-            if (timedOut) {
+            if (activeTimedOut) {
                 resolve(124);
                 return;
             }
@@ -342,6 +335,25 @@ async function runDockerCommand(args : string[], image : string, options : {
 
             resolve(code ?? 1);
         });
+
+        function startActiveTimeout() {
+            if (activeTimeoutStarted || activeTimeoutMs <= 0) {
+                return;
+            }
+
+            activeTimeoutStarted = true;
+            activeTimeout = setTimeout(() => {
+                activeTimedOut = true;
+                console.log(`[${image}] Command timed out after ${activeTimeoutMs} ms: docker ${args.join(" ")}`);
+                child.kill("SIGINT");
+
+                setTimeout(() => {
+                    if (!child.killed) {
+                        child.kill("SIGTERM");
+                    }
+                }, 5000).unref();
+            }, activeTimeoutMs);
+        }
     });
 }
 
