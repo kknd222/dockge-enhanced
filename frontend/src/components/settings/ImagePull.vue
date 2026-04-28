@@ -211,11 +211,7 @@ export default {
             return this.$parent.$parent.$parent.settingsLoaded;
         },
         sourceList() {
-            if (!Array.isArray(this.settings.enhancedPullMirrorSources)) {
-                this.settings.enhancedPullMirrorSources = [];
-            }
-
-            return this.settings.enhancedPullMirrorSources;
+            return Array.isArray(this.settings.enhancedPullMirrorSources) ? this.settings.enhancedPullMirrorSources : [];
         },
     },
 
