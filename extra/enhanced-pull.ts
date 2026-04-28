@@ -3,6 +3,7 @@ import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 const MIRROR_PROBE_TIMEOUT_MS = 3000;
 const PULL_TIMEOUT_MS = 90000;
 const MAX_MIRROR_ATTEMPTS = 2;
+const MIRROR_PROGRESS_TIMEOUT_MS = 15000;
 
 interface PullConfig {
     concurrency: number;
@@ -106,7 +107,11 @@ async function pullImage(image : string, config : PullConfig) {
             }
 
             console.log(`[enhanced-pull] Pulling ${originalImage} via ${candidateImage} (attempt ${attempt}/${allowedAttempts})`);
-            const pullExitCode = await runDockerCommand([ "pull", candidateImage ], originalImage, false, PULL_TIMEOUT_MS);
+            const pullExitCode = await runDockerCommand([ "pull", candidateImage ], originalImage, {
+                allowFailure: false,
+                timeoutMs: PULL_TIMEOUT_MS,
+                requireProgressWithinMs: candidateImage !== originalImage ? MIRROR_PROGRESS_TIMEOUT_MS : 0,
+            });
 
             if (pullExitCode !== 0) {
                 console.log(`[enhanced-pull] Pull failed for ${candidateImage}`);
@@ -124,7 +129,9 @@ async function pullImage(image : string, config : PullConfig) {
 
                 if (!config.keepMirrorTags) {
                     console.log(`[enhanced-pull] Removing temporary mirror tag ${candidateImage}`);
-                    await runDockerCommand([ "image", "rm", candidateImage ], originalImage, true);
+                    await runDockerCommand([ "image", "rm", candidateImage ], originalImage, {
+                        allowFailure: true,
+                    });
                 }
             }
 
@@ -235,17 +242,37 @@ async function buildCandidateImages(imageReference : ImageReference, mirrorMap :
     return Array.from(candidates);
 }
 
-async function runDockerCommand(args : string[], image : string, allowFailure = false, timeoutMs = 0) : Promise<number> {
+async function runDockerCommand(args : string[], image : string, options : {
+    allowFailure?: boolean,
+    timeoutMs?: number,
+    requireProgressWithinMs?: number,
+} = {}) : Promise<number> {
     return new Promise((resolve, reject) => {
+        const allowFailure = options.allowFailure === true;
+        const timeoutMs = options.timeoutMs || 0;
+        const requireProgressWithinMs = options.requireProgressWithinMs || 0;
         const child = spawn("docker", args, {
             stdio: [ "ignore", "pipe", "pipe" ],
         });
         let timedOut = false;
         let timeout : NodeJS.Timeout | undefined;
+        let progressTimedOut = false;
+        let progressTimeout : NodeJS.Timeout | undefined;
+        let hasMeaningfulProgress = false;
 
         activeChildren.add(child);
-        pipeOutput(child.stdout, image);
-        pipeOutput(child.stderr, image);
+        pipeOutput(child.stdout, image, (line) => {
+            if (isMeaningfulPullProgress(line)) {
+                hasMeaningfulProgress = true;
+                clearTimeout(progressTimeout);
+            }
+        });
+        pipeOutput(child.stderr, image, (line) => {
+            if (isMeaningfulPullProgress(line)) {
+                hasMeaningfulProgress = true;
+                clearTimeout(progressTimeout);
+            }
+        });
 
         if (timeoutMs > 0) {
             timeout = setTimeout(() => {
@@ -261,9 +288,28 @@ async function runDockerCommand(args : string[], image : string, allowFailure = 
             }, timeoutMs);
         }
 
+        if (requireProgressWithinMs > 0) {
+            progressTimeout = setTimeout(() => {
+                if (hasMeaningfulProgress) {
+                    return;
+                }
+
+                progressTimedOut = true;
+                console.log(`[${image}] No download progress within ${requireProgressWithinMs} ms: docker ${args.join(" ")}`);
+                child.kill("SIGINT");
+
+                setTimeout(() => {
+                    if (!child.killed) {
+                        child.kill("SIGTERM");
+                    }
+                }, 5000).unref();
+            }, requireProgressWithinMs);
+        }
+
         child.on("error", (error) => {
             activeChildren.delete(child);
             clearTimeout(timeout);
+            clearTimeout(progressTimeout);
 
             if (allowFailure) {
                 console.log(`[${image}] ${error.message}`);
@@ -277,9 +323,15 @@ async function runDockerCommand(args : string[], image : string, allowFailure = 
         child.on("close", (code) => {
             activeChildren.delete(child);
             clearTimeout(timeout);
+            clearTimeout(progressTimeout);
 
             if (timedOut) {
                 resolve(124);
+                return;
+            }
+
+            if (progressTimedOut) {
+                resolve(125);
                 return;
             }
 
@@ -345,7 +397,7 @@ function buildMirrorTestURL(mirror : string) : string {
 
 class SuccessSignal extends Error {}
 
-function pipeOutput(stream : NodeJS.ReadableStream, image : string) {
+function pipeOutput(stream : NodeJS.ReadableStream, image : string, onLine? : (line : string) => void) {
     let buffer = "";
 
     stream.on("data", (chunk : Buffer | string) => {
@@ -355,15 +407,28 @@ function pipeOutput(stream : NodeJS.ReadableStream, image : string) {
             const newLineIndex = buffer.indexOf("\n");
             const line = buffer.slice(0, newLineIndex).replace(/\r$/, "");
             buffer = buffer.slice(newLineIndex + 1);
+            onLine?.(line);
             console.log(`[${image}] ${line}`);
         }
     });
 
     stream.on("end", () => {
         if (buffer.trim() !== "") {
+            onLine?.(buffer.trimEnd());
             console.log(`[${image}] ${buffer.trimEnd()}`);
         }
     });
+}
+
+function isMeaningfulPullProgress(line : string) : boolean {
+    return [
+        "Downloading",
+        "Download complete",
+        "Pull complete",
+        "Already exists",
+        "Extracting",
+        "Verifying Checksum",
+    ].some((token) => line.includes(token));
 }
 
 main().catch((error) => {
