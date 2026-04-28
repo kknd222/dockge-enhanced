@@ -66,54 +66,11 @@
                 </button>
             </div>
 
-            <div v-if="enhancedPullEnabled && stack.isManagedByDockge" class="alert alert-secondary py-2 px-3 mb-3" role="alert">
-                <strong>{{ $t("enhancedPullActive") }}</strong>
-                {{ $t("enhancedPullActiveDescription", { concurrency: enhancedPullInfo.concurrency, retries: enhancedPullInfo.retries }) }}
-                <span v-if="dockerHubMirrorSummary">
-                    {{ $t("enhancedPullDockerHubMirrors") }}: {{ dockerHubMirrorSummary }}
-                </span>
-            </div>
-
             <!-- URLs -->
             <div v-if="urls.length > 0" class="mb-3">
                 <a v-for="(urlItem, index) in urls" :key="index" target="_blank" :href="urlItem.url">
                     <span class="badge bg-secondary me-2">{{ urlItem.display }}</span>
                 </a>
-            </div>
-
-            <!-- Progress Terminal -->
-            <div v-if="enhancedPullEnabled && stack.isManagedByDockge" class="shadow-box big-padding mb-3 progress-strategy-panel">
-                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                    <h4 class="mb-0">{{ $t("enhancedPullStrategyPanel") }}</h4>
-                    <span class="badge bg-primary">{{ $t("enhancedPullStrategyActive") }}</span>
-                </div>
-
-                <div class="small text-muted mb-2">
-                    {{ $t("enhancedPullStrategyActiveDescription", { concurrency: enhancedPullInfo.concurrency, retries: enhancedPullInfo.retries }) }}
-                </div>
-
-                <div class="mb-3">
-                    <strong>{{ $t("enhancedPullCurrentImages") }}</strong>
-                    <div v-if="composeImageList.length > 0" class="mt-2 d-flex flex-wrap gap-2">
-                        <span v-for="image in composeImageList" :key="image" class="badge bg-secondary">{{ image }}</span>
-                    </div>
-                    <div v-else class="small text-muted mt-2">
-                        {{ $t("enhancedPullNoComposeImages") }}
-                    </div>
-                </div>
-
-                <div>
-                    <strong>{{ $t("enhancedPullCurrentCandidates") }}</strong>
-                    <div v-if="dockerHubSourceList.length > 0" class="mt-2">
-                        <div v-for="(source, index) in dockerHubSourceList" :key="source.id || source.mirror || index" class="small mb-1">
-                            {{ index + 1 }}. {{ source.name || source.mirror }} - <code>{{ source.mirror }}</code>
-                            <span v-if="source.lastTestMs" class="text-muted">({{ source.lastTestMs }} ms)</span>
-                        </div>
-                    </div>
-                    <div v-else class="small text-muted mt-2">
-                        {{ $t("enhancedPullNoCandidates") }}
-                    </div>
-                </div>
             </div>
 
             <transition name="slide-fade" appear>
@@ -396,55 +353,6 @@ export default {
     computed: {
         endpointDisplay() {
             return this.$root.endpointDisplayFunction(this.endpoint);
-        },
-
-        enhancedPullInfo() {
-            return this.$root.info.enhancedPull || {
-                enabled: false,
-                concurrency: 0,
-                retries: 0,
-                mirrorMap: {},
-            };
-        },
-
-        enhancedPullEnabled() {
-            return this.enhancedPullInfo.enabled;
-        },
-
-        dockerHubMirrorSummary() {
-            const dockerHubMirrors = this.enhancedPullInfo.mirrorMap?.["docker.io"];
-
-            if (!dockerHubMirrors || dockerHubMirrors.length === 0) {
-                return "";
-            }
-
-            return dockerHubMirrors.join(", ");
-        },
-
-        dockerHubSourceList() {
-            const sourceList = this.enhancedPullInfo.mirrorSources;
-
-            if (!Array.isArray(sourceList)) {
-                return [];
-            }
-
-            return sourceList.filter((source) => source.enabled && source.registry === "docker.io");
-        },
-
-        composeImageList() {
-            if (!this.jsonConfig.services || typeof this.jsonConfig.services !== "object") {
-                return [];
-            }
-
-            const imageSet = new Set();
-
-            for (const service of Object.values(this.jsonConfig.services)) {
-                if (service && typeof service.image === "string" && service.image.trim() !== "") {
-                    imageSet.add(service.image.trim());
-                }
-            }
-
-            return Array.from(imageSet);
         },
 
         urls() {

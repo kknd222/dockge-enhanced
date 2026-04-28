@@ -23,6 +23,14 @@ import childProcessAsync from "promisify-child-process";
 import { Settings } from "./settings";
 import { getEnhancedPullConfig } from "./enhanced-pull-config";
 
+interface ParsedImageReference {
+    original: string;
+    registry: string;
+    repository: string;
+    reference: string;
+    normalizedName: string;
+}
+
 export class Stack {
 
     name: string;
@@ -209,7 +217,7 @@ export class Stack {
 
     async deploy(socket : DockgeSocket) : Promise<number> {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        await this.pullImages(socket, terminalName);
+        await this.pullImages(socket, terminalName, true);
         let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
         if (exitCode !== 0) {
             throw new Error("Failed to deploy, please check the terminal output for more information.");
@@ -424,7 +432,7 @@ export class Stack {
 
     async start(socket: DockgeSocket) {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        await this.pullImages(socket, terminalName);
+        await this.pullImages(socket, terminalName, false);
         let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
         if (exitCode !== 0) {
             throw new Error("Failed to start, please check the terminal output for more information.");
@@ -461,7 +469,7 @@ export class Stack {
 
     async update(socket: DockgeSocket) {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await this.pullImages(socket, terminalName);
+        let exitCode = await this.pullImages(socket, terminalName, true);
 
         // If the stack is not running, we don't need to restart it
         await this.updateStatus();
@@ -583,7 +591,7 @@ export class Stack {
         return exitCode;
     }
 
-    async pullImages(socket : DockgeSocket, terminalName : string) : Promise<number> {
+    async pullImages(socket : DockgeSocket, terminalName : string, checkRemoteLatest : boolean) : Promise<number> {
         const enhancedPullConfig = await getEnhancedPullConfig();
 
         if (!enhancedPullConfig.enabled) {
@@ -594,10 +602,10 @@ export class Stack {
             return exitCode;
         }
 
-        const imageList = this.getImageList();
+        const imageList = await this.getPullNeededImageList(checkRemoteLatest);
 
         if (imageList.length === 0) {
-            log.debug("pullImages", `No explicit images found in stack ${this.name}, skipping enhanced pull.`);
+            log.debug("pullImages", `No images require pulling in stack ${this.name}, skipping enhanced pull.`);
             return 0;
         }
 
@@ -644,6 +652,194 @@ export class Stack {
         }
 
         return Array.from(imageSet);
+    }
+
+    async getPullNeededImageList(checkRemoteLatest : boolean) : Promise<string[]> {
+        const imageList = this.getImageList();
+        const pullNeededImageList : string[] = [];
+
+        for (const image of imageList) {
+            if (await this.shouldPullImage(image, checkRemoteLatest)) {
+                pullNeededImageList.push(image);
+            } else {
+                log.debug("pullImages", `Skipping pull for ${image} because the local image is already usable.`);
+            }
+        }
+
+        return pullNeededImageList;
+    }
+
+    async shouldPullImage(image : string, checkRemoteLatest : boolean) : Promise<boolean> {
+        if (!await this.localImageExists(image)) {
+            return true;
+        }
+
+        if (!checkRemoteLatest || !this.isLatestReference(image)) {
+            return false;
+        }
+
+        try {
+            return await this.hasRemoteLatestChanged(image);
+        } catch (error) {
+            if (error instanceof Error) {
+                log.warn("pullImages", `Falling back to pull latest image ${image} because remote digest check failed: ${error.message}`);
+            }
+            return true;
+        }
+    }
+
+    async localImageExists(image : string) : Promise<boolean> {
+        try {
+            const res = await childProcessAsync.spawn("docker", [ "image", "inspect", image ], {
+                encoding: "utf-8",
+            });
+            return !!res.stdout;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    isLatestReference(image : string) : boolean {
+        const parsedImage = this.parseImageReference(image);
+        return parsedImage.reference === "latest";
+    }
+
+    async hasRemoteLatestChanged(image : string) : Promise<boolean> {
+        const parsedImage = this.parseImageReference(image);
+        const localRepoDigests = await this.getLocalRepoDigests(image);
+        const remoteDigest = await this.fetchRemoteDigest(parsedImage);
+
+        if (!remoteDigest) {
+            return true;
+        }
+
+        return !localRepoDigests.includes(`${parsedImage.normalizedName}@${remoteDigest}`);
+    }
+
+    async getLocalRepoDigests(image : string) : Promise<string[]> {
+        try {
+            const res = await childProcessAsync.spawn("docker", [ "image", "inspect", image, "--format", "{{json .RepoDigests}}" ], {
+                encoding: "utf-8",
+            });
+            return JSON.parse(res.stdout.toString()) as string[];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    async fetchRemoteDigest(image : ParsedImageReference) : Promise<string | null> {
+        const registryBaseURL = image.registry === "docker.io" ? "https://registry-1.docker.io" : `https://${image.registry}`;
+        const manifestURL = `${registryBaseURL}/v2/${image.repository}/manifests/${image.reference}`;
+        const headers = await this.getRegistryHeaders(image, manifestURL);
+        const response = await fetch(manifestURL, {
+            method: "HEAD",
+            headers,
+        });
+
+        if (!response.ok) {
+            throw new Error(`Registry digest check failed with HTTP ${response.status}`);
+        }
+
+        return response.headers.get("docker-content-digest");
+    }
+
+    async getRegistryHeaders(image : ParsedImageReference, manifestURL : string) : Promise<Headers> {
+        const headers = new Headers({
+            Accept: [
+                "application/vnd.oci.image.index.v1+json",
+                "application/vnd.docker.distribution.manifest.list.v2+json",
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            ].join(", "),
+        });
+
+        let response = await fetch(manifestURL, {
+            method: "HEAD",
+            headers,
+        });
+
+        if (response.status !== 401) {
+            return headers;
+        }
+
+        const authHeader = response.headers.get("www-authenticate");
+
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return headers;
+        }
+
+        const authParams = this.parseAuthHeader(authHeader);
+        const tokenURL = new URL(authParams.realm);
+        if (authParams.service) {
+            tokenURL.searchParams.set("service", authParams.service);
+        }
+        if (authParams.scope) {
+            tokenURL.searchParams.set("scope", authParams.scope);
+        } else {
+            tokenURL.searchParams.set("scope", `repository:${image.repository}:pull`);
+        }
+
+        response = await fetch(tokenURL, {
+            headers: {
+                Accept: "application/json",
+            },
+        });
+
+        if (!response.ok) {
+            throw new Error(`Registry token request failed with HTTP ${response.status}`);
+        }
+
+        const tokenPayload = await response.json() as { token?: string, access_token?: string };
+        const token = tokenPayload.token || tokenPayload.access_token;
+
+        if (!token) {
+            throw new Error("Registry token response did not include a token.");
+        }
+
+        headers.set("Authorization", `Bearer ${token}`);
+        return headers;
+    }
+
+    parseAuthHeader(authHeader : string) : Record<string, string> {
+        const params: Record<string, string> = {};
+
+        for (const match of authHeader.matchAll(/([a-z_]+)="([^"]+)"/gi)) {
+            params[match[1]] = match[2];
+        }
+
+        return params;
+    }
+
+    parseImageReference(image : string) : ParsedImageReference {
+        const digestIndex = image.indexOf("@");
+        const imageWithoutDigest = digestIndex === -1 ? image : image.slice(0, digestIndex);
+        let reference = digestIndex === -1 ? "latest" : image.slice(digestIndex + 1);
+        let imageName = imageWithoutDigest;
+
+        const lastSlashIndex = imageWithoutDigest.lastIndexOf("/");
+        const lastColonIndex = imageWithoutDigest.lastIndexOf(":");
+        if (digestIndex === -1 && lastColonIndex > lastSlashIndex) {
+            reference = imageWithoutDigest.slice(lastColonIndex + 1);
+            imageName = imageWithoutDigest.slice(0, lastColonIndex);
+        }
+
+        const parts = imageName.split("/");
+        const firstPart = parts[0];
+        const hasExplicitRegistry = firstPart.includes(".") || firstPart.includes(":") || firstPart === "localhost";
+        const registry = hasExplicitRegistry ? firstPart : "docker.io";
+        let repository = hasExplicitRegistry ? parts.slice(1).join("/") : parts.join("/");
+
+        if (!repository.includes("/")) {
+            repository = `library/${repository}`;
+        }
+
+        return {
+            original: image,
+            registry,
+            repository,
+            reference,
+            normalizedName: `${registry}/${repository}`,
+        };
     }
 
     getComposeEnvironmentVariables() : dotenv.DotenvParseOutput {
