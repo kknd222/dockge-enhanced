@@ -147,6 +147,15 @@ export class Settings {
         await Promise.all(promiseList);
 
         Settings.deleteCache(keyList);
+
+        // Flush the WAL into the main database file so saved settings are not left sitting in an
+        // un-checkpointed WAL (which is vulnerable to loss on an ungraceful restart). Settings saves
+        // are infrequent, so a checkpoint here is cheap; ignore failures (e.g. SQLITE_BUSY).
+        try {
+            await R.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        } catch (e) {
+            log.debug("settings", "wal_checkpoint after setSettings skipped: " + (e instanceof Error ? e.message : String(e)));
+        }
     }
 
     /**

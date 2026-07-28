@@ -164,7 +164,15 @@ export class Database {
         // This ensures that an operating system crash or power failure will not corrupt the database.
         // FULL synchronous is very safe, but it is also slower.
         // Read more: https://sqlite.org/pragma.html#pragma_synchronous
-        await R.exec("PRAGMA synchronous = NORMAL");
+        //
+        // Use FULL instead of NORMAL: in WAL mode with NORMAL, committed transactions are NOT
+        // fsync'd on commit and only reach disk on a checkpoint (which by default only happens on a
+        // graceful shutdown or once the WAL grows to ~1000 pages). A hard reboot / power loss / an
+        // ungraceful `docker stop` (SIGKILL after the stop timeout, common because Dockge keeps
+        // long-lived websockets open) therefore loses any settings written since the last checkpoint
+        // — e.g. image-pull mirror sources. FULL fsyncs the WAL on every commit, so committed
+        // settings survive an ungraceful restart. Write volume here is tiny, so the cost is negligible.
+        await R.exec("PRAGMA synchronous = FULL");
 
         log.debug("db", "SQLite config:");
         log.debug("db", await R.getAll("PRAGMA journal_mode"));
