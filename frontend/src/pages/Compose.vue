@@ -193,7 +193,7 @@
                     </div>
 
                     <!-- ENV editor -->
-                    <div v-if="isEditMode">
+                    <div>
                         <h4 class="mb-3">.env</h4>
                         <div class="shadow-box mb-3 editor-box" :class="{'edit-mode' : isEditMode}">
                             <code-mirror
