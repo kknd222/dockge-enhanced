@@ -205,13 +205,25 @@ export class Stack {
             }
         }
 
+        const composePath = path.join(dir, this._composeFileName);
+        const envPath = path.join(dir, ".env");
+
         // Write or overwrite the compose.yaml
-        fs.writeFileSync(path.join(dir, this._composeFileName), this.composeYAML);
+        await fsAsync.writeFile(composePath, this.composeYAML);
+
+        // Keep an existing .env in sync, or create it when the editor contains values.
+        if (await fileExists(envPath) || this.composeENV.trim() !== "") {
+            await fsAsync.writeFile(envPath, this.composeENV);
+        }
+
         if (process.env.PUID && process.env.PGID) {
             const uid = Number(process.env.PUID);
             const gid = Number(process.env.PGID);
-            fs.lchownSync(dir, uid, gid);
-            fs.chownSync(path.join(dir, this._composeFileName), uid, gid);
+            await fsAsync.lchown(dir, uid, gid);
+            await fsAsync.chown(composePath, uid, gid);
+            if (await fileExists(envPath)) {
+                await fsAsync.chown(envPath, uid, gid);
+            }
         }
     }
 
