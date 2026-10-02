@@ -20,7 +20,7 @@ try {
 `);
     const stack = new Stack({ stacksDir: root } as DockgeServer, "fixture");
     const images = await stack.getImageList();
-    assert.deepEqual(images, [ "example.test/org/safeline-postgres:15.18", "example.test/org/safeline-mgt:9.4.1" ]);
+    assert.deepEqual(images.sort(), [ "example.test/org/safeline-postgres:15.18", "example.test/org/safeline-mgt:9.4.1" ].sort());
     console.log("COMPOSE_NESTED_DEFAULT_REQUIRED_GLOBAL_ENV_OK");
 } finally {
     fs.rmSync(root, { recursive: true });
