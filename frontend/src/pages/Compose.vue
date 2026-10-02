@@ -706,7 +706,8 @@ export default {
                 this.processing = false;
                 this.$root.toastRes(res);
                 if (res.cleanup) {
-                    this.$root.toastRes({ ok: true, msg: `${this.$t("cleanupResult")}: ${res.cleanup.removed.length} / ${res.cleanup.skipped.length}` });
+                    this.$root.toastRes({ ok: true,
+                        msg: `${this.$t("cleanupResult")}: ${res.cleanup.removed.length} / ${res.cleanup.skipped.length}` });
                 }
             });
         },
