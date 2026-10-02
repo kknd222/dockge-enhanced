@@ -2,11 +2,35 @@ import { AgentSocketHandler } from "../agent-socket-handler";
 import { DockgeServer } from "../dockge-server";
 import { callbackError, callbackResult, checkLogin, DockgeSocket, ValidationError } from "../util-server";
 import { Stack } from "../stack";
+import { ImageManager } from "../image-manager";
 import { AgentSocket } from "../../common/agent-socket";
 
 export class DockerSocketHandler extends AgentSocketHandler {
     create(socket : DockgeSocket, server : DockgeServer, agentSocket : AgentSocket) {
         // Do not call super.create()
+        const images = new ImageManager();
+        const imageAction = (event: string, handler: (...args: unknown[]) => Promise<unknown>) => {
+            agentSocket.on(event, async (...args: unknown[]) => {
+                const callback = args.pop();
+                try {
+                    checkLogin(socket);
+                    const result = await handler(...args);
+                    callbackResult({ ok: true,
+                        result }, callback);
+                } catch (error) {
+                    callbackError(error, callback);
+                }
+            });
+        };
+        imageAction("listDockerImages", () => images.list());
+        imageAction("dockerImageDiskUsage", () => images.diskUsage());
+        imageAction("inspectDockerImage", (id) => images.details(id));
+        imageAction("removeDockerImage", (id) => images.remove(id));
+        imageAction("tagDockerImage", (id, tag) => images.tag(id, tag));
+        imageAction("cleanupDanglingImages", async () => {
+            const candidates = (await images.list()).filter((image: { dangling: boolean }) => image.dangling).map((image: { id: string }) => image.id);
+            return images.cleanupCandidates(candidates);
+        });
 
         agentSocket.on("deployStack", async (name : unknown, composeYAML : unknown, composeENV : unknown, isAdd : unknown, callback) => {
             try {
@@ -177,7 +201,9 @@ export class DockerSocketHandler extends AgentSocketHandler {
         });
 
         // updateStack
-        agentSocket.on("updateStack", async (stackName : unknown, callback) => {
+        agentSocket.on("updateStack", async (stackName : unknown, optionsOrCallback, optionalCallback?) => {
+            const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : optionalCallback;
+            const cleanup = typeof optionsOrCallback === "object" && optionsOrCallback !== null && "cleanupOldImages" in optionsOrCallback && optionsOrCallback.cleanupOldImages === true;
             try {
                 checkLogin(socket);
 
@@ -186,11 +212,12 @@ export class DockerSocketHandler extends AgentSocketHandler {
                 }
 
                 const stack = await Stack.getStack(server, stackName);
-                await stack.update(socket);
+                const cleanupResult = await stack.update(socket, cleanup);
                 callbackResult({
                     ok: true,
                     msg: "Updated",
                     msgi18n: true,
+                    cleanup: typeof cleanupResult === "object" ? cleanupResult : undefined,
                 }, callback);
                 server.sendStackList();
             } catch (e) {

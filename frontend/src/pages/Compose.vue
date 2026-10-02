@@ -699,11 +699,15 @@ export default {
         },
 
         updateStack() {
+            const cleanupOldImages = window.confirm(this.$t("cleanupAfterUpdatePrompt"));
             this.processing = true;
 
-            this.$root.emitAgent(this.endpoint, "updateStack", this.stack.name, (res) => {
+            this.$root.emitAgent(this.endpoint, "updateStack", this.stack.name, { cleanupOldImages }, (res) => {
                 this.processing = false;
                 this.$root.toastRes(res);
+                if (res.cleanup) {
+                    this.$root.toastRes({ ok: true, msg: `${this.$t("cleanupResult")}: ${res.cleanup.removed.length} / ${res.cleanup.skipped.length}` });
+                }
             });
         },
 

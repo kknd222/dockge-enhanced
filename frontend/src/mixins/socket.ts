@@ -406,6 +406,7 @@ export default defineComponent({
                 if (res.ok) {
                     terminal.write(res.buffer);
                     terminalMap.set(terminalName, terminal);
+                    this.emitAgent(endpoint, "terminalResize", terminalName, terminal.rows, terminal.cols);
                 } else {
                     this.toastRes(res);
                 }

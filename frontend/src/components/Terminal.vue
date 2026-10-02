@@ -1,11 +1,28 @@
 <template>
-    <div class="shadow-box">
+    <div class="shadow-box terminal-wrapper">
+        <div class="terminal-toolbar">
+            <button class="btn btn-sm btn-normal" @click="copySelection">{{ $t("copySelection") }}</button>
+            <button class="btn btn-sm btn-normal" @click="copyAll">{{ $t("copyAllLogs") }}</button>
+            <button class="btn btn-sm btn-normal" @click="showPlainText">{{ $t("plainTextLogs") }}</button>
+            <button class="btn btn-sm btn-normal" @click="downloadLogs">{{ $t("downloadLogs") }}</button>
+        </div>
+        <div v-if="contextMenu" class="terminal-context shadow-box" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop>
+            <button @click="copySelection">{{ $t("copySelection") }}</button>
+            <button @click="copyAll">{{ $t("copyAllLogs") }}</button>
+            <button @click="showPlainText">{{ $t("plainTextLogs") }}</button>
+            <button v-if="mode !== 'displayOnly'" @click="handlePaste">{{ $t("paste") }}</button>
+        </div>
+        <div v-if="plainText !== null" class="terminal-plain">
+            <button class="btn btn-sm btn-normal" @click="plainText = null">{{ $t("closePlainText") }}</button>
+            <textarea :value="plainText" readonly wrap="off" :aria-label="$t('plainTextLogs')"></textarea>
+        </div>
         <div v-pre ref="terminal" class="main-terminal"></div>
     </div>
 </template>
 
 <script>
 import { Terminal } from "@xterm/xterm";
+import { terminalText, copyText } from "../utils/terminal-text";
 import { FitAddon } from "@xterm/addon-fit";
 import { TERMINAL_COLS, TERMINAL_ROWS } from "../../../common/util-common";
 
@@ -68,6 +85,8 @@ export default {
     emits: [ "has-data" ],
     data() {
         return {
+            contextMenu: null,
+            plainText: null,
             first: true,
             terminalInputBuffer: "",
             cursorPosition: 0,
@@ -87,6 +106,7 @@ export default {
             fontSize: 14,
             fontFamily: "'JetBrains Mono', monospace",
             cursorBlink,
+            scrollback: 10000,
             cols: this.cols,
             rows: this.rows,
         });
@@ -106,9 +126,15 @@ export default {
         // Add right-click context menu handler for paste
         this.$refs.terminal.addEventListener("contextmenu", this.handleContextMenu);
 
-        // Add selection handler for copy to clipboard
-        this.terminal.onSelectionChange(() => {
-            this.handleSelection();
+        // Explicit copy avoids races while the user is adjusting a selection.
+        document.addEventListener("click", this.closeContextMenu);
+        this.terminal.attachCustomKeyEventHandler(event => {
+            if (event.type === "keydown" && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && (event.shiftKey || this.terminal.hasSelection())) {
+                event.preventDefault();
+                this.copySelection();
+                return false;
+            }
+            return true;
         });
 
         // Notify parent component when data is received
@@ -142,8 +168,11 @@ export default {
     },
 
     unmounted() {
+        this.disposed = true;
         window.removeEventListener("resize", this.onResizeEvent); // Remove the resize event listener from the window object.
         this.$root.unbindTerminal(this.name);
+        this.resizeObserver?.disconnect();
+        document.removeEventListener("click", this.closeContextMenu);
         this.terminal.dispose();
         this.$refs.terminal?.removeEventListener("contextmenu", this.handleContextMenu);
     },
@@ -275,21 +304,21 @@ export default {
          * It then addes an event listener to the window object to listen for resize events and calls the fit method of the terminalFitAddOn.
          */
         updateTerminalSize() {
-            if (!Object.hasOwn(this, "terminalFitAddOn")) {
+            if (!this.terminalFitAddOn) {
                 this.terminalFitAddOn = new FitAddon();
                 this.terminal.loadAddon(this.terminalFitAddOn);
                 window.addEventListener("resize", this.onResizeEvent);
+                this.resizeObserver = new ResizeObserver(this.onResizeEvent);
+                this.resizeObserver.observe(this.$refs.terminal);
+            }
+            this.onResizeEvent();
+        },
+        onResizeEvent() {
+            if (!this.$refs.terminal?.clientWidth || this.disposed) {
+                return;
             }
             this.terminalFitAddOn.fit();
-        },
-        /**
-         * Handles the resize event of the terminal component.
-         */
-        onResizeEvent() {
-            this.terminalFitAddOn.fit();
-            let rows = this.terminal.rows;
-            let cols = this.terminal.cols;
-            this.$root.emitAgent(this.endpoint, "terminalResize", this.name, rows, cols);
+            this.$root.emitAgent(this.endpoint, "terminalResize", this.name, this.terminal.rows, this.terminal.cols);
         },
 
         /**
@@ -341,34 +370,43 @@ export default {
          * Handle right-click context menu for paste operation
          */
         handleContextMenu(event) {
-            // Prevent default context menu
             event.preventDefault();
-
-            // Only handle paste for modes that support input
-            if (this.mode === "mainTerminal" || this.mode === "interactive") {
-                this.handlePaste();
+            this.contextMenu = { x: Math.min(event.clientX, window.innerWidth - 220),
+                y: Math.min(event.clientY, window.innerHeight - 180) };
+        },
+        closeContextMenu() {
+            this.contextMenu = null;
+        },
+        copySelection() {
+            const text = this.terminal.getSelection();
+            if (text) {
+                this.copyToClipboard(text);
+            } else {
+                this.showPlainText();
             }
         },
-
-        /**
-         * Handle text selection in terminal - copy to clipboard
-         */
-        handleSelection() {
-            const selectedText = this.terminal.getSelection();
-            if (selectedText && selectedText.length > 0) {
-                this.copyToClipboard(selectedText);
-            }
+        copyAll() {
+            this.copyToClipboard(terminalText(this.terminal));
         },
-
-        /**
-         * Copy text to clipboard
-         */
+        showPlainText() {
+            this.closeContextMenu();
+            this.plainText = terminalText(this.terminal);
+        },
+        downloadLogs() {
+            const url = URL.createObjectURL(new Blob([ terminalText(this.terminal) ], { type: "text/plain;charset=utf-8" }));
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `${this.name}.txt`;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        },
         async copyToClipboard(text) {
+            this.closeContextMenu();
             try {
-                await navigator.clipboard.writeText(text);
-                console.debug("Text copied to clipboard:", text);
-            } catch (error) {
-                console.error("Failed to copy to clipboard:", error);
+                await copyText(text);
+            } catch {
+                this.plainText = text;
+                this.$root.toastError(this.$t("copyFallbackHint"));
             }
         },
     }
@@ -376,14 +414,15 @@ export default {
 </script>
 
 <style scoped lang="scss">
-.main-terminal {
-    height: 100%;
-}
+.terminal-wrapper { position: relative; height: 100%; display: flex; flex-direction: column; }
+.terminal-toolbar { display: flex; gap: 0.4rem; flex-wrap: wrap; padding: 0.4rem; }
+.main-terminal { flex: 1; min-height: 100px; overflow: hidden; }
+.terminal-context { position: fixed; z-index: 3000; padding: 0.5rem; min-width: 200px; }
+.terminal-context button { display: block; width: 100%; border: 0; padding: 0.5rem; text-align: left; background: transparent; color: inherit; }
+.terminal-plain { position: absolute; inset: 45px 0 0; z-index: 5; background: #fff; padding: 0.5rem; }
+.terminal-plain textarea { width: 100%; height: calc(100% - 40px); font-family: monospace; white-space: pre; }
 </style>
 
 <style lang="scss">
-.terminal {
-    background-color: black !important;
-    height: 100%;
-}
+.terminal { background-color: black !important; height: 100%; }
 </style>

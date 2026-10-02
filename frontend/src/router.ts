@@ -8,6 +8,8 @@ import Console from "./pages/Console.vue";
 import Compose from "./pages/Compose.vue";
 import ContainerTerminal from "./pages/ContainerTerminal.vue";
 
+const Images = () => import("./pages/Images.vue");
+
 const Settings = () => import("./pages/Settings.vue");
 
 // Settings - Sub Pages
@@ -55,6 +57,10 @@ const routes = [
                                 name: "containerTerminalEndpoint",
                             },
                         ]
+                    },
+                    {
+                        path: "/images",
+                        component: Images,
                     },
                     {
                         path: "/console",

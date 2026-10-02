@@ -33,6 +33,9 @@
                     </router-link>
                 </li>
 
+                <li v-if="$root.loggedIn" class="nav-item me-2">
+                    <router-link to="/images" class="nav-link">{{ $t("imageManagement") }}</router-link>
+                </li>
                 <li v-if="$root.loggedIn" class="nav-item">
                     <div class="dropdown dropdown-profile-pic">
                         <div class="nav-link" data-bs-toggle="dropdown">

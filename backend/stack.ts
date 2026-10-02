@@ -17,10 +17,10 @@ import {
     RUNNING, TERMINAL_ROWS,
     UNKNOWN
 } from "../common/util-common";
-import { envsubstYAML } from "../common/util-common";
 import { InteractiveTerminal, Terminal } from "./terminal";
 import childProcessAsync from "promisify-child-process";
 import { Settings } from "./settings";
+import { ImageManager } from "./image-manager";
 import { getEnhancedPullConfig } from "./enhanced-pull-config";
 
 interface ParsedImageReference {
@@ -479,7 +479,18 @@ export class Stack {
         return exitCode;
     }
 
-    async update(socket: DockgeSocket) {
+    async update(socket: DockgeSocket, cleanupOldImages = false) {
+        const manager = new ImageManager();
+        const oldImages = cleanupOldImages ? await manager.capture(await this.getImageList()) : [];
+        if (cleanupOldImages) {
+            const containers = await childProcessAsync.spawn("docker", this.getComposeOptions("ps", "-aq"), { cwd: this.path,
+                encoding: "utf-8" });
+            const ids = String(containers.stdout || "").trim().split(/\s+/).filter(Boolean);
+            if (ids.length) {
+                const previous = await childProcessAsync.spawn("docker", [ "inspect", "--format", "{{.Image}}", ...ids ], { encoding: "utf-8" });
+                oldImages.push(...String(previous.stdout || "").trim().split(/\s+/).filter(Boolean));
+            }
+        }
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
         let exitCode = await this.pullImages(socket, terminalName, true);
 
@@ -493,6 +504,11 @@ export class Stack {
         exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
         if (exitCode !== 0) {
             throw new Error("Failed to restart, please check the terminal output for more information.");
+        }
+        if (cleanupOldImages) {
+            const result = await manager.cleanupCandidates(oldImages);
+            log.info("imageCleanup", JSON.stringify(result));
+            return result;
         }
         return exitCode;
     }
@@ -644,30 +660,18 @@ export class Stack {
         return exitCode;
     }
 
-    getImageList() : string[] {
-        const env = this.getComposeEnvironmentVariables();
-        const composeYAML = envsubstYAML(this.composeYAML, env);
-        const composeConfig = yaml.parse(composeYAML) as {
-            services?: Record<string, { image?: string }>
-        } | null;
-
-        if (!composeConfig?.services || typeof composeConfig.services !== "object") {
-            return [];
-        }
-
-        const imageSet = new Set<string>();
-
-        for (const service of Object.values(composeConfig.services)) {
-            if (service && typeof(service.image) === "string" && service.image.trim() !== "") {
-                imageSet.add(service.image.trim());
-            }
-        }
-
-        return Array.from(imageSet);
+    async getImageList() : Promise<string[]> {
+        // Docker Compose is the source of truth for nested defaults, required
+        // variables, global.env, escaped dollars and folded YAML scalars.
+        const result = await childProcessAsync.spawn("docker", this.getComposeOptions("config", "--images"), {
+            cwd: this.path,
+            encoding: "utf-8",
+        });
+        return Array.from(new Set(String(result.stdout || "").split(/\r?\n/).map(image => image.trim()).filter(Boolean)));
     }
 
     async getPullNeededImageList(checkRemoteLatest : boolean) : Promise<string[]> {
-        const imageList = this.getImageList();
+        const imageList = await this.getImageList();
         const pullNeededImageList : string[] = [];
 
         for (const image of imageList) {
